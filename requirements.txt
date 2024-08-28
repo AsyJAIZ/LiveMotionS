@@ -1,0 +1,2 @@
+progressbar2>=4.4.2
+PyExifTool>=0.5.6
