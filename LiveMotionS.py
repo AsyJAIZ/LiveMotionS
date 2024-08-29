@@ -242,7 +242,7 @@ def main(args):
 		global move
 		move = args.move
 		global widgets
-		widgets = [progressbar.widgets.SimpleProgress(), ', ', progressbar.widgets.Percentage(), ' ', progressbar.widgets.GranularBar(), ' ', progressbar.widgets.SmoothingETA()]
+		widgets = [progressbar.widgets.SimpleProgress(), ', ', progressbar.widgets.Percentage(), ' ', progressbar.widgets.GranularBar(), ' ', progressbar.widgets.AdaptiveTransferSpeed(), ', ', progressbar.widgets.SmoothingETA()]
 		
 		global workingDir
 		workingDir = os.path.abspath(args.directory)
