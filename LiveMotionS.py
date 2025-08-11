@@ -34,8 +34,33 @@ def append_mpvd_to_heic(heic_file, video_file, video_size):
 	with open(heic_file, 'ab') as p, open(video_file, 'rb') as v:
 		p.write(mpvd_box)
 		p.write(v.read())
+		
+def move_files(photo_path, video_path):
+	if photo_path is None and video_path is None: # Clean that up
+		return
+	orig_dir = os.path.join(outDir, "..", "originals_" + os.path.basename(workingDir))
+	newpath_dir = os.path.abspath(os.path.join(orig_dir, os.path.dirname(os.path.relpath(photo_path if not None else video_path, workingDir))))
+	if os.path.exists(newpath_dir):
+		if not os.path.isdir(newpath_dir):
+			logging.error(f"Location is a file: {newpath_dir}. No changes were made.\a")
+			return
+	else:
+		os.makedirs(newpath_dir, exist_ok=True)
+	logging.info(f'Moving originals to {newpath_dir}')
+	if photo_path is not None:
+		shutil.move(photo_path, newpath_dir)
+	if video_path is not None:
+		shutil.move(video_path, newpath_dir)
+	
+def nexist(photo_path, video_path):
+	return f"Either {os.path.relpath(photo_path, outDir)} or {os.path.relpath(video_path, workingDir)} doesn't exist. Skipping.\a"
 
 def process_db(cur, db):
+	saf = "Safety wait has ended. Starting"
+	print("Processing the database. Press CTRL-C in 5 seconds in order to cancel.")
+	time.sleep(5)
+	print(saf)
+	
 	xmp = "XMP-"
 	gcam = xmp + "GCamera"
 	gcont = xmp + "GContainer"
@@ -55,9 +80,6 @@ def process_db(cur, db):
 	video_path = None
 	timestamp = None
 	out_path = None
-	
-	print("Processing the database. Press CTRL-C in 5 seconds in order to cancel.")
-	time.sleep(5)
 
 	while True:
 		cur.execute("SELECT * FROM pair WHERE done = ? AND p_path IS NOT NULL AND v_path IS NOT NULL LIMIT ?", (False, limit))
@@ -66,7 +88,7 @@ def process_db(cur, db):
 		for row in rows:
 			_, photo_path, video_path, timestamp, out_path, _ = row
 			if not os.path.exists(photo_path) or not os.path.exists(video_path):
-				logging.error(f"Either {os.path.relpath(photo_path, outDir)} or {os.path.relpath(video_path, workingDir)} doesn't exist. Skipping.\a")
+				logging.error(nexist(photo_path, video_path))
 				continue
 			os.makedirs(os.path.dirname(out_path), exist_ok=True)
 			if os.path.exists(out_path):
@@ -80,24 +102,35 @@ def process_db(cur, db):
 			append_mpvd_to_heic(out_path, video_path, video_size)
 			cur.execute("UPDATE pair SET done = ? WHERE out_path = ?", (True, out_path))
 			if move:
-				orig_dir = os.path.join(outDir, "..", "originals_" + os.path.basename(workingDir))
-				newpath_dir = os.path.abspath(os.path.join(orig_dir, os.path.dirname(os.path.relpath(photo_path, workingDir))))
-				if os.path.exists(newpath_dir):
-					if not os.path.isdir(newpath_dir):
-						logging.error(f"Location is a file: {newpath_dir}. No changes were made.\a")
-						continue
-				else:
-					os.makedirs(newpath_dir, exist_ok=True)
-				logging.info(f'Moving originals to {newpath_dir}')
-				shutil.move(photo_path, newpath_dir)
-				shutil.move(video_path, newpath_dir)
+				move_files(photo_path, video_path)
+			count += 1
 			bar.increment()
-			++count
 		db.commit()
+		
 	bar.finish(dirty=True)
 	if total>(done+count):
 		logging.warning("The list of unmerged files is in the database.")
 	print("Done.")
+	
+	if move:
+		print("If you don't want to move already processed in the past iterations originals to the originals directory, press CTRL-C in the next 5 seconds to cancel.")
+		time.sleep(5)
+		
+		print(saf)
+		total = (cur.execute("SELECT COUNT(*) FROM pair WHERE done = ? AND p_path IS NOT NULL AND v_path IS NOT NULL", (True,))).fetchone()[0]
+		count = 0
+		bar = progressbar.ProgressBar(prefix='Moving: ', max_value=total, widgets=widgets) # TODO: move flag
+		while True:
+			cur.execute("SELECT * FROM pair WHERE done = ? AND p_path IS NOT NULL AND v_path IS NOT NULL LIMIT ? OFFSET ?", (True, limit, count))
+			rows = cur.fetchall()
+			if not rows: break
+			for row in rows:
+				_, photo_path, video_path, timestamp, out_path, _ = row
+				move_files(photo_path if os.path.exists(photo_path) else None, video_path if os.path.exists(video_path) else None)
+				count += 1
+				bar.increment()
+		bar.finish(dirty=True)
+		print("Done.")
 
 def process_file(file, cur):
 	rel_file = os.path.relpath(file, workingDir)
@@ -121,12 +154,15 @@ def process_file(file, cur):
 		
 	tags = list(tags[0].values())[1:]
 	if not file.lower().endswith('.mov'):
-		dt = datetime.strptime(tags[1], "%Y:%m:%d %H:%M:%S")
-		basename = dt.strftime("IMG%Y%m%d_%H%M%S")
-		duplic = (cur.execute('SELECT COUNT(*) FROM pair WHERE out_path LIKE ? AND id != ?', ("%" + basename + "%", uuid))).fetchone()[0]
-		count = f"_{duplic}" if duplic != 0 else ""
-		ext = os.path.basename(file).split('.')[-1]
-		newname = f"{basename}{count}MP.{ext}"
+		if rname:
+			dt = datetime.strptime(tags[1], "%Y:%m:%d %H:%M:%S")
+			basename = dt.strftime("IMG%Y%m%d_%H%M%S")
+			duplic = (cur.execute('SELECT COUNT(*) FROM pair WHERE out_path LIKE ? AND id != ?', ("%" + basename + "%", uuid))).fetchone()[0]
+			count = f"_{duplic}" if duplic != 0 else ""
+			ext = os.path.basename(file).split('.')[-1]
+			newname = f"{basename}{count}MP.{ext}"
+		else:
+			newname = os.path.basename(rel_file)
 		outname = os.path.join(outDir, os.path.dirname(rel_file), newname)
 	else:
 		try:
@@ -227,6 +263,19 @@ def main(args):
 	global outDir
 	outDir = os.path.abspath(args.output) if args.output is not None else os.path.abspath("output")
 	logging.info(f'Output path is {outDir}')
+	
+	database = sqlite3.connect(os.path.abspath(args.database) if args.database is not None else os.path.join(args.directory, 'photos.db'))
+	cur = database.cursor()
+	check = cur.execute("SELECT name FROM sqlite_master WHERE name='pair'")
+	
+	if check.fetchone() is None or args.overwrite:
+		logging.info('Creating a database.')
+		cur.execute("DROP TABLE IF EXISTS pair")
+		cur.execute("CREATE TABLE pair(id, p_path, v_path, timestamp, out_path, done)")
+	else:
+		if not args.dry_run:
+			process_db(cur, database)
+			exit()
 
 	if args.directory is not None:
 		if not os.path.exists(args.directory):
@@ -236,24 +285,16 @@ def main(args):
 			logging.error('--dir is not a directory.')
 			exit(1)
 
-		database = sqlite3.connect(os.path.abspath(args.database) if args.database is not None else os.path.join(args.directory, 'photos.db'))
-		cur = database.cursor()
-		check = cur.execute("SELECT name FROM sqlite_master WHERE name='pair'")
 		global move
 		move = args.move
 		global widgets
 		widgets = [progressbar.widgets.SimpleProgress(), ', ', progressbar.widgets.Percentage(), ' ', progressbar.widgets.GranularBar(), ' ', progressbar.widgets.AdaptiveTransferSpeed(), ', ', progressbar.widgets.SmoothingETA()]
+		global rname
+		rname = args.rename
 		
 		global workingDir
 		workingDir = os.path.abspath(args.directory)
-		if check.fetchone() is None or args.overwrite:
-			logging.info('Creating a database.')
-			cur.execute("DROP TABLE IF EXISTS pair")
-			cur.execute("CREATE TABLE pair(id, p_path, v_path, timestamp, out_path, done)")
-		else:
-			if not args.dry_run:
-				process_db(cur, database)
-				exit()
+		
 
 		scan_dir(cur, args.recursive)
 		database.commit()
@@ -281,6 +322,7 @@ if __name__ == '__main__':
 	parser.add_argument('-d', '--directory', '--dir', help='A directory to read from. Overrides --img and --mov')
 	parser.add_argument('-r', '--recursive', '--re', help='Read from subdirectories', action='store_true')
 	parser.add_argument('-c', '--move', '--cd', help='Move original files to different directory to separate', action='store_true')
+	parser.add_argument('-a', '--rename', '--rn', help='Rename photos according to Google specifications (IMG_yyyymmdd_hhmmss_cMP.ext). Otherwise appends prefix to original name.', action='store_true')
 	parser.add_argument('-i', '--image', '--img', help='Used in pair with --video')
 	parser.add_argument('-m', '--video', '--mov')
 	parser.add_argument('-o', '--output', '--out', help='A directory to write to')
